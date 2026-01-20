@@ -23,9 +23,21 @@
 - 遅延: 送信時刻が取れれば送信→含まれる秒数の分布。
 - 集中度（簡易）: 24hの提案者/ビルダー分布。
 
+### TONにおけるMEV手段の前提
+- **ガス入札競争（GPA）**: 事実上なし。ガスを積んで順番を奪う手段は使えない。
+- **到達競争（低レイテンシ/特定ピア経由）**: 可能。提案者が「先に受信したTXを優先」するなら、早押しで前に入れる余地がある。
+- **提案者による並べ替え**: 可能。提案者はブロック内の順序を決める裁量があり、自身のTXや任意の順を先頭に置ける（有効性・ブロック制約を満たす範囲で）。
+
+#### チェーン別ざっくり比較
+- **Ethereum**: GPAあり（tip競争）。到達競争あり。提案者/ビルダー並べ替え余地あり（MEV-Boost/PBS系）。
+- **Solana**: 優先手数料で実質GPA的競争あり。到達競争あり。リーダー裁量で並べ替え余地あり。
+- **TON**: GPAなし。到達競争あり。提案者裁量で並べ替え余地あり。
+
 ## 範囲
 - 期間: 直近24時間に限定。
 - ペア: STON.fi USDT<>TON のみ（初回スコープ縮小）。
+- 対象ルーターアドレス: [`EQCS4UEa5UaJLzOyyKieqQOQ2P9M-7kXpkO5HnP3Bv250cN3`](https://tonviewer.com/EQCS4UEa5UaJLzOyyKieqQOQ2P9M-7kXpkO5HnP3Bv250cN3)（STON.fi DEX, stonfi_router_v2）。
+  - 参考: 他候補 `EQBSNX_5mSikBVttWhIaIb0f8jJU7fL6kvyyFVppd7dWRO6M`（stonfi_router_v2, *USDe専用）、`EQB3ncyBUTjZUA5EnFKR5_EnOMI9V1tTEAAPaiU71gc4TiUt`（stonfi_router）。
 
 ## 理由（この粒度で始めるワケ）
 - 初回から広げるとデータ量・実装コストが膨らむため、1ペア・24hで有害MEVの兆候をまず確認する。
