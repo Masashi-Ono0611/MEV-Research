@@ -39,6 +39,24 @@
 - 対象ルーターアドレス: [`EQCS4UEa5UaJLzOyyKieqQOQ2P9M-7kXpkO5HnP3Bv250cN3`](https://tonviewer.com/EQCS4UEa5UaJLzOyyKieqQOQ2P9M-7kXpkO5HnP3Bv250cN3)（STON.fi DEX, stonfi_router_v2）。
   - 参考: 他候補 `EQBSNX_5mSikBVttWhIaIb0f8jJU7fL6kvyyFVppd7dWRO6M`（stonfi_router_v2, *USDe専用）、`EQB3ncyBUTjZUA5EnFKR5_EnOMI9V1tTEAAPaiU71gc4TiUt`（stonfi_router）。
 
+### Swap方向の決定（観察ベースのルール）
+- InMessage (Jetton Notify) が `Proxy TON pTON` ウォレット `EQCSIMGBps_qzRG3uPYhON8bucyCtu0mYdL1-u4gSz77IBa3` から来る → **TON→USDT** と判定。
+- InMessage (Jetton Notify) が `Tether USD` ウォレット `EQCSLWJ9fY7b0A5OI72wxUp27l4fRlc6GvRBeFf6PiPpH4p3` から来る → **USDT→TON** と判定。  
+
+### 取得とパースのポイント
+- エンドポイント例: `https://tonapi.io/v2/blockchain/accounts/{router}/transactions?limit=N&before_lt=...` をページング取得。
+- `query_id` で In (Jetton Notify) と Out (Jetton Transfer) をペアリングし、1スワップを復元。
+- 抜き出す主なフィールド: `timestamp` / `block_id or lt/hash` / `sender` / `destination` / `amount` (in/out) / `token_wallet1` など。
+- Swap方向判定は上記ウォレットルールで行い、`in_amount` / `out_amount` から実効レート・スリッページを計算。
+- 24h分を `before_lt` でページングしてNDJSONに保存し、後段のノートで集計・検知に用いる。
+
+#### tonapiレスポンスで確認できた項目（サンプル取得より）
+- トップレベル: `hash`, `lt`, `utime`, `block`, `total_fees`
+- in_msg: `op_code` (Jetton Notify), `source/destination`, `value`, `decoded_body.query_id/amount/sender/forward_payload (StonfiSwapV2, min_out, receiver など)`
+- out_msgs: `op_code` (Jetton Transfer), `decoded_body.query_id/amount/destination/response_destination`
+- DEX固有: `decoded_op_name` (stonfi_swap_v2, stonfi_pay_to_v2 など) と `additional_info` / `dex_payload` に `token_wallet1`, `amount0_out/amount1_out`
+- 提案者/validator情報はレスポンスに見当たらず（要別途手段）。
+
 ## 理由（この粒度で始めるワケ）
 - 初回から広げるとデータ量・実装コストが膨らむため、1ペア・24hで有害MEVの兆候をまず確認する。
 - 問題が見えたら他ペアや期間、ブリッジ経路に拡張する。
