@@ -2,6 +2,5 @@ papers/raw/
 ton-analysis/sc.ruff_cache
 .python-version
 .venv
-ton-analysis/data/opcode_debug.ndjson
-ton-analysis/data/swaps_sample.ndjson
+ton-analysis/data/
 ton-analysis/scripts/.env
