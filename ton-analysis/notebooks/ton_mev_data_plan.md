@@ -67,6 +67,13 @@
 - `scripts/debug_extract_opcodes.py`: デバッグ用の軽量版。動作・出力フォーマットは fetch_swaps.py と同等（direction/in/out/rate 含む）が、用途は調査・比較に限定。
 - `scripts/mev_rate_check.py`: レート統一（USDT/TON decimal-adjusted, scaled by 1000）と min_out 対比の余裕度を確認する集計スクリプト。
   - レート統一: TON->USDT は 1/rate、USDT->TON は rate、その後1000倍スケール。
+  - 使い方例:
+    - 直近10〜30分を取得: `python ton-analysis/scripts/fetch_swaps.py --max-age-mins 30 --limit 30 --pages 10 --out ton-analysis/data/swaps_latest.ndjson`
+    - ブロック情報を付けて解析（同一ブロックFR/バックランを判定）:
+      `MEV_FETCH_BLOCKS=true python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_latest.ndjson`
+    - ブロック取得なしで軽量解析:
+      `MEV_FETCH_BLOCKS=false python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_latest.ndjson`
+    - fetch_swapsは `NEXT_PUBLIC_TON_API_BASE_URL` / `TON_ROUTER` / `NEXT_PUBLIC_TON_API_KEY` 等を環境変数で上書き可能。mev_rate_checkは `MEV_FETCH_BLOCKS` でブロック取得のオン/オフを制御。
   - min_out 抽出: `swap.out_msg.decoded_body.dex_payload.swap_body.min_out` または `notify.in_msg.decoded_body.forward_payload.value.value.cross_swap_body.min_out`。
   - hit_pct = (min_out / actual_out) * 100（100%なら実受取がmin_outちょうど）。hit_pctが高いほど許容下限ギリギリ。
   - 現行サンプル: min_out 欠損なし（with_min_out=31, missing=0）、例: hit_pct max ≈99.97%, median=99.00%, mean≈95.48%。
