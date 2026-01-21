@@ -40,14 +40,26 @@
   - 参考: 他候補 `EQBSNX_5mSikBVttWhIaIb0f8jJU7fL6kvyyFVppd7dWRO6M`（stonfi_router_v2, *USDe専用）、`EQB3ncyBUTjZUA5EnFKR5_EnOMI9V1tTEAAPaiU71gc4TiUt`（stonfi_router）。
 
 ### Swap方向の決定（観察ベースのルール）
-- InMessage (Jetton Notify) が `Proxy TON pTON` ウォレット `EQCSIMGBps_qzRG3uPYhON8bucyCtu0mYdL1-u4gSz77IBa3` から来る → **TON→USDT** と判定。
-- InMessage (Jetton Notify) が `Tether USD` ウォレット `EQCSLWJ9fY7b0A5OI72wxUp27l4fRlc6GvRBeFf6PiPpH4p3` から来る → **USDT→TON** と判定。  
+- 1つの swap は query_id で 2 呼び出しがペアになる:
+  - 前半: in `Jetton Notify (0x7362d09c)`, out `Stonfi Swap V2 (0x6664de2a)`
+  - 後半: in `Stonfi Pay To V2 (0x657b54f5)`, out `Jetton Transfer (0x0f8a7ea5)`
+- 方向判定の優先順（実装済み）:
+  1) Jetton Transfer の destination が USDTウォレットなら **TON→USDT**、pTONウォレットなら **USDT→TON**
+  2) 次に Jetton Notify の sender が USDTウォレットなら **USDT→TON**、pTONウォレットなら **TON→USDT**
+  3) 次に Swap V2 の `dex_payload.token_wallet1` が USDTウォレットなら **TON→USDT**、pTONウォレットなら **USDT→TON**
+  - 該当が無ければ "unknown"（片側欠落時など）。
 
 ### 取得とパースのポイント
 - エンドポイント例: `https://tonapi.io/v2/blockchain/accounts/{router}/transactions?limit=N&before_lt=...` をページング取得。
 - `query_id` で In (Jetton Notify) と Out (Jetton Transfer) をペアリングし、1スワップを復元。
-- 抜き出す主なフィールド: `timestamp` / `block_id or lt/hash` / `sender` / `destination` / `amount` (in/out) / `token_wallet1` など。
-- Swap方向判定は上記ウォレットルールで行い、`in_amount` / `out_amount` から実効レート・スリッページを計算。
+- 抜き出す主なフィールド（debug_extract_opcodes.py の出力例）:
+  - `query_id`, `direction`
+  - `notify` (tx_hash, in_msg→decoded_body.amount/sender/query_id)
+  - `swap` (out_msg→decoded_body.left_amount/right_amount/dex_payload.token_wallet1, receiver/min_out など)
+  - `pay` (in_msg→additional_info.amount0_out/amount1_out 等)
+  - `transfer` (out_msg→decoded_body.amount/destination)
+- `direction` と `in/out amount` から実効レート・スリッページを計算可能（Jetton decimals は別途考慮）。
+- 24h分を `before_lt` でページングしてNDJSONに保存し、後段のノートで集計・検知に用いる。
 - 24h分を `before_lt` でページングしてNDJSONに保存し、後段のノートで集計・検知に用いる。
 
 #### tonapiレスポンスで確認できた項目（サンプル取得より）

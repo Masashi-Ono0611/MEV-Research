@@ -13,6 +13,7 @@ import json
 import os
 import sys
 from typing import Any, Dict, List, Optional
+from decimal import Decimal, InvalidOperation, getcontext
 
 import requests
 
@@ -22,6 +23,9 @@ ROUTER = os.getenv("TON_ROUTER", "EQCS4UEa5UaJLzOyyKieqQOQ2P9M-7kXpkO5HnP3Bv250c
 BASE_URL = (os.getenv("NEXT_PUBLIC_TON_API_BASE_URL") or "https://tonapi.io") + "/v2/blockchain"
 API_KEY = os.getenv("NEXT_PUBLIC_TON_API_KEY") or os.getenv("TON_API_KEY_MAINNET")
 OUT_PATH = os.path.join(os.path.dirname(__file__), "../data/opcode_debug.ndjson")
+
+# for rate calculation
+getcontext().prec = 28
 
 IN_OP_NOTIFY = "0x7362d09c"  # Jetton Notify
 IN_OP_PAY_V2 = "0x657b54f5"  # Stonfi Pay To V2
@@ -104,7 +108,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not any(parts.values()):
             continue
         direction = infer_direction(parts)
-        rows.append({"query_id": qid, "direction": direction, **parts})
+        meta = extract_meta(parts)
+        amounts = compute_amounts(parts, direction)
+        rows.append({"query_id": qid, "direction": direction, **meta, **amounts, **parts})
 
     os.makedirs(os.path.dirname(os.path.abspath(OUT_PATH)), exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:
@@ -152,6 +158,78 @@ def infer_direction(parts: Dict[str, Any]) -> str:
         return "USDT->TON"
 
     return "unknown"
+
+
+def extract_meta(parts: Dict[str, Any]) -> Dict[str, Any]:
+    """Collect representative lt/utime from notify/transfer when available."""
+
+    notify = parts.get("notify") or {}
+    transfer = parts.get("transfer") or {}
+
+    def pick_lt_utime(msg: Dict[str, Any]) -> Dict[str, Any]:
+        lt = (msg.get("in_msg") or msg.get("out_msg") or {}).get("created_lt")
+        utime = (msg.get("in_msg") or msg.get("out_msg") or {}).get("created_at")
+        return {"lt": lt, "utime": utime}
+
+    n_meta = pick_lt_utime(notify) if notify else {"lt": None, "utime": None}
+    t_meta = pick_lt_utime(transfer) if transfer else {"lt": None, "utime": None}
+
+    # prefer notify, fallback to transfer
+    lt = n_meta.get("lt") or t_meta.get("lt")
+    utime = n_meta.get("utime") or t_meta.get("utime")
+
+    return {"lt": lt, "utime": utime}
+
+
+def compute_amounts(parts: Dict[str, Any], direction: str) -> Dict[str, Any]:
+    """Compute in_amount, out_amount, and rate (out/in) using Jetton amounts.
+
+    TON->USDT: in = notify.amount (pTON), out = transfer.amount (USDT)
+    USDT->TON: in = swap.right_amount (USDT), out = transfer.amount (pTON)
+    Falls back to pay.additional_info when needed. Rate is Decimal(out)/Decimal(in) if valid.
+    """
+
+    def d(val: Any) -> Optional[Decimal]:
+        try:
+            return Decimal(str(val))
+        except (InvalidOperation, TypeError):
+            return None
+
+    notify = (parts.get("notify") or {}).get("in_msg") or {}
+    swap = (parts.get("swap") or {}).get("out_msg") or {}
+    pay = (parts.get("pay") or {}).get("in_msg") or {}
+    transfer = (parts.get("transfer") or {}).get("out_msg") or {}
+
+    in_amt = None
+    out_amt = None
+
+    if direction == "TON->USDT":
+        # in from notify.amount or pay.amount0_out
+        in_amt = d(((notify.get("decoded_body") or {}).get("amount")))
+        if in_amt is None:
+            in_amt = d(((pay.get("decoded_body") or {}).get("amount0_out")))
+        # out from transfer.amount
+        out_amt = d(((transfer.get("decoded_body") or {}).get("amount")))
+    elif direction == "USDT->TON":
+        # in from swap.right_amount (USDT) or pay.amount1_out
+        in_amt = d(((swap.get("decoded_body") or {}).get("right_amount")))
+        if in_amt is None:
+            in_amt = d(((pay.get("decoded_body") or {}).get("amount1_out")))
+        # out from transfer.amount (pTON)
+        out_amt = d(((transfer.get("decoded_body") or {}).get("amount")))
+
+    rate = None
+    if in_amt and out_amt and in_amt != 0:
+        try:
+            rate = (out_amt / in_amt).quantize(Decimal("1.000000000000000000"))
+        except InvalidOperation:
+            rate = None
+
+    return {
+        "in_amount": str(in_amt) if in_amt is not None else None,
+        "out_amount": str(out_amt) if out_amt is not None else None,
+        "rate": str(rate) if rate is not None else None,
+    }
 
 
 if __name__ == "__main__":
