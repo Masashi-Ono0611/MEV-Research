@@ -32,6 +32,7 @@
 - **Ethereum**: GPAあり（tip競争）。到達競争あり。提案者/ビルダー並べ替え余地あり（MEV-Boost/PBS系）。
 - **Solana**: 優先手数料で実質GPA的競争あり。到達競争あり。リーダー裁量で並べ替え余地あり。
 - **TON**: GPAなし。到達競争あり。提案者裁量で並べ替え余地あり。
+  - シャーディング構造: シャードごとにブロックを生成し、マスターチェーンが「正しい最新シャードブロック」への参照をBFTで合意する。シャード内Tx順序は提案者裁量（lt昇順で適用）、マスターチェーン側で参照順をいじってもTx順序や価格インパクトはほぼ変わらない。
 
 ## 範囲
 - 期間: 直近24時間に限定。
@@ -64,6 +65,12 @@
 #### スクリプト整理
 - `scripts/fetch_swaps.py`: 本番用。query_id で Jetton Notify / SwapV2 / PayToV2 / Jetton Transfer を束ね、direction/in/out/rate/lt/utime を付けて NDJSON 出力。デフォルト出力先 `ton-analysis/data/swaps_24h.ndjson`。ページングなしの単発取得（limit 指定のみ）。direction が `unknown` の行は除外。
 - `scripts/debug_extract_opcodes.py`: デバッグ用の軽量版。動作・出力フォーマットは fetch_swaps.py と同等（direction/in/out/rate 含む）が、用途は調査・比較に限定。
+- `scripts/mev_rate_check.py`: レート統一（USDT/TON decimal-adjusted, scaled by 1000）と min_out 対比の余裕度を確認する集計スクリプト。
+  - レート統一: TON->USDT は 1/rate、USDT->TON は rate、その後1000倍スケール。
+  - min_out 抽出: `swap.out_msg.decoded_body.dex_payload.swap_body.min_out` または `notify.in_msg.decoded_body.forward_payload.value.value.cross_swap_body.min_out`。
+  - hit_pct = (min_out / actual_out) * 100（100%なら実受取がmin_outちょうど）。hit_pctが高いほど許容下限ギリギリ。
+  - 現行サンプル: min_out 欠損なし（with_min_out=31, missing=0）、例: hit_pct max ≈99.97%, median=99.00%, mean≈95.48%。
+  - 留意: hit_pctはユーザー設定の許容幅に依存。見積価格が無いため被害額は前後Txや外部価格を用いて評価する必要あり。
 
 #### tonapiレスポンスで確認できた項目（サンプル取得より）
 - トップレベル: `hash`, `lt`, `utime`, `block`, `total_fees`
