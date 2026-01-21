@@ -72,14 +72,20 @@ def infer_direction(from_wallet: str) -> str:
         return "TON->USDT"
     if from_wallet.lower() == USDT_WALLET.lower():
         return "USDT->TON"
-    return "unknown"
+    # For debugging, return the raw address when it doesn't match either wallet
+    return from_wallet or "unknown"
 
 
 def parse_swaps(tx: Dict[str, Any]) -> Iterable[SwapLog]:
     tx_hash = tx.get("hash", "")
     lt = int(tx.get("lt", 0))
     utime = int(tx.get("utime", 0))
+
     in_msg = tx.get("in_msg") or {}
+    in_op = in_msg.get("op_code", "").lower()
+    if in_op != "0x7362d09c":  # Jetton Notify only
+        return []
+
     in_decoded = in_msg.get("decoded_body") or {}
     query_id = str(in_decoded.get("query_id", ""))
     in_amount = str(in_decoded.get("amount", ""))
@@ -88,23 +94,44 @@ def parse_swaps(tx: Dict[str, Any]) -> Iterable[SwapLog]:
         val = in_msg.get("value")
         if val is not None:
             in_amount = str(val)
+
     sender = in_decoded.get("sender") or (in_msg.get("source") or {}).get("address", "")
 
-    # Determine direction by source wallet
+    # Determine direction by source wallet (Jetton Notify source is jetton wallet)
     source_addr = (in_msg.get("source") or {}).get("address", "")
     direction = infer_direction(source_addr)
 
-    # Find matching out_msg with same query_id
+    # Collect Jetton Transfer out_msgs only
     out_msgs = tx.get("out_msgs") or []
-    out_amount = ""
-    for om in out_msgs:
-        od = om.get("decoded_body") or {}
-        if str(od.get("query_id", "")) == query_id:
-            out_amount = str(od.get("amount", ""))
-            break
-
-    if not query_id or not in_amount or not out_amount:
+    transfer_outs = [om for om in out_msgs if (om.get("op_code", "").lower()) == "0x0f8a7ea5"]
+    if not transfer_outs:
         return []
+
+    # If query_id exists, prefer matching; else take first transfer
+    selected_out = None
+    if query_id:
+        for om in transfer_outs:
+            od = om.get("decoded_body") or {}
+            if str(od.get("query_id", "")) == query_id:
+                selected_out = om
+                break
+    if selected_out is None:
+        selected_out = transfer_outs[0]
+
+    od = selected_out.get("decoded_body") or {}
+    out_amount = str(od.get("amount", ""))
+
+    if not out_amount:
+        return []
+
+    # Raw output should focus on the relevant messages only
+    filtered_raw = {
+        "hash": tx_hash,
+        "lt": lt,
+        "utime": utime,
+        "in_msg": in_msg,
+        "out_msg": selected_out,
+    }
 
     yield SwapLog(
         tx_hash=tx_hash,
@@ -115,16 +142,35 @@ def parse_swaps(tx: Dict[str, Any]) -> Iterable[SwapLog]:
         sender=sender or "",
         in_amount=in_amount,
         out_amount=out_amount,
-        raw=tx,
+        raw=filtered_raw,
     )
 
 
 def fetch_all(api_url: str, router: str, limit: int, api_key: Optional[str], before_lt: Optional[int]) -> List[SwapLog]:
-    payload = fetch_page(api_url, router, limit, before_lt, api_key)
-    txs = payload.get("transactions", [])
     swaps: List[SwapLog] = []
-    for tx in txs:
-        swaps.extend(parse_swaps(tx))
+    seen_lts = set()
+
+    while True:
+        payload = fetch_page(api_url, router, limit, before_lt, api_key)
+        txs = payload.get("transactions", [])
+        if not txs:
+            break
+
+        for tx in txs:
+            swaps.extend(parse_swaps(tx))
+
+        last_lt = txs[-1].get("lt")
+        if last_lt is None or last_lt in seen_lts:
+            break
+        seen_lts.add(last_lt)
+
+        # Prepare next page anchor
+        before_lt = int(last_lt)
+
+        # If fewer than requested, no more pages
+        if len(txs) < limit:
+            break
+
     return swaps
 
 
