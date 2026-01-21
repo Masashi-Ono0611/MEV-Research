@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 import requests
 
-DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "swaps_sample.ndjson"
+DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "swaps_sample.ndjson"
 SCALE = Decimal(1000)
 TON_API_BASE = os.getenv("TON_API_BASE_URL") or os.getenv("NEXT_PUBLIC_TON_API_BASE_URL") or "https://tonapi.io"
 FETCH_BLOCKS = (os.getenv("MEV_FETCH_BLOCKS") or "true").lower() in ("1", "true", "yes", "on")
@@ -147,7 +147,13 @@ def extract_min_out(row: dict) -> Decimal | None:
 
 
 def main():
-    rows = load_rows(DATA_PATH)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MEV rate check")
+    parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="NDJSON swaps file")
+    args = parser.parse_args()
+
+    rows = load_rows(Path(args.data))
     # attach primary_lt for ordering (smallest created_lt among component msgs)
     for r in rows:
         r["primary_lt"] = extract_primary_lt(r) or r.get("lt")
