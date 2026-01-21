@@ -56,14 +56,30 @@ def extract_notify_hash(row: dict) -> str | None:
 def fetch_block_id(tx_hash: str) -> dict | None:
     if not tx_hash:
         return None
+    def parse_block_str(s: str) -> dict | None:
+        try:
+            if s.startswith("(") and s.endswith(")"):
+                items = s.strip("()").split(",")
+                if len(items) == 3:
+                    wc = int(items[0])
+                    shard = items[1]
+                    seqno = int(items[2])
+                    return {"workchain": wc, "shard": shard, "seqno": seqno}
+        except Exception:
+            return None
+        return None
+
     url = urllib.parse.urljoin(TON_API_BASE, f"/v2/blockchain/transactions/{tx_hash}")
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        # tonapi sometimes nests block info under block_id or block
         blk = data.get("block_id") or data.get("block") or {}
+        if isinstance(blk, str):
+            parsed = parse_block_str(blk)
+            if parsed:
+                return parsed
         wc = blk.get("workchain") if isinstance(blk, dict) else None
         shard = blk.get("shard") if isinstance(blk, dict) else None
         seqno = blk.get("seqno") if isinstance(blk, dict) else None
@@ -72,6 +88,7 @@ def fetch_block_id(tx_hash: str) -> dict | None:
         return {"workchain": wc, "shard": shard, "seqno": seqno}
     except Exception:
         return None
+    return None
 
 
 def block_key(bid: dict | None) -> str | None:
@@ -280,6 +297,17 @@ def main():
             if not bk:
                 continue
             by_block.setdefault(bk, []).append(r)
+
+        # debug: show block composition
+        print(f"blocks_with_tx: {len(by_block)}")
+        multi = {bk: arr for bk, arr in by_block.items() if len(arr) > 1}
+        print(f"blocks_with_multiple_tx: {len(multi)}")
+        for bk, arr in sorted(multi.items(), key=lambda x: x[0])[:20]:
+            arr_sorted = sorted(arr, key=lambda x: x.get("primary_lt", 0))
+            print(
+                f"block={bk} count={len(arr_sorted)} qids={[a.get('query_id') for a in arr_sorted]} "
+                f"primary_lt={[a.get('primary_lt') for a in arr_sorted]} dirs={[a.get('direction') for a in arr_sorted]}"
+            )
         for bk, arr in by_block.items():
             arr.sort(key=lambda x: x.get("primary_lt", 0))
             for i in range(1, len(arr)):
