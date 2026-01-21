@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 import requests
 
-DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "swaps_sample.ndjson"
+DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "swaps_sample.ndjson"
 SCALE = Decimal(1000)
 TON_API_BASE = os.getenv("TON_API_BASE_URL") or os.getenv("NEXT_PUBLIC_TON_API_BASE_URL") or "https://tonapi.io"
 FETCH_BLOCKS = (os.getenv("MEV_FETCH_BLOCKS") or "true").lower() in ("1", "true", "yes", "on")
@@ -56,14 +56,30 @@ def extract_notify_hash(row: dict) -> str | None:
 def fetch_block_id(tx_hash: str) -> dict | None:
     if not tx_hash:
         return None
+    def parse_block_str(s: str) -> dict | None:
+        try:
+            if s.startswith("(") and s.endswith(")"):
+                items = s.strip("()").split(",")
+                if len(items) == 3:
+                    wc = int(items[0])
+                    shard = items[1]
+                    seqno = int(items[2])
+                    return {"workchain": wc, "shard": shard, "seqno": seqno}
+        except Exception:
+            return None
+        return None
+
     url = urllib.parse.urljoin(TON_API_BASE, f"/v2/blockchain/transactions/{tx_hash}")
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             return None
         data = resp.json()
-        # tonapi sometimes nests block info under block_id or block
         blk = data.get("block_id") or data.get("block") or {}
+        if isinstance(blk, str):
+            parsed = parse_block_str(blk)
+            if parsed:
+                return parsed
         wc = blk.get("workchain") if isinstance(blk, dict) else None
         shard = blk.get("shard") if isinstance(blk, dict) else None
         seqno = blk.get("seqno") if isinstance(blk, dict) else None
@@ -72,6 +88,7 @@ def fetch_block_id(tx_hash: str) -> dict | None:
         return {"workchain": wc, "shard": shard, "seqno": seqno}
     except Exception:
         return None
+    return None
 
 
 def block_key(bid: dict | None) -> str | None:
@@ -147,7 +164,13 @@ def extract_min_out(row: dict) -> Decimal | None:
 
 
 def main():
-    rows = load_rows(DATA_PATH)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="MEV rate check")
+    parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="NDJSON swaps file")
+    args = parser.parse_args()
+
+    rows = load_rows(Path(args.data))
     # attach primary_lt for ordering (smallest created_lt among component msgs)
     for r in rows:
         r["primary_lt"] = extract_primary_lt(r) or r.get("lt")
@@ -264,6 +287,31 @@ def main():
             f"VICTIM qid={v.get('query_id')} utime={v.get('utime')} lt={v.get('lt')} primary_lt={v.get('primary_lt')} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f}"
         )
 
+    # Backrun candidates (victim then opposite-direction tx that benefits from victim move)
+    backrun_pairs = []
+    for i in range(1, len(rows)):
+        v = rows[i - 1]
+        b = rows[i]
+        if v.get("direction") == "USDT->TON" and b.get("direction") == "TON->USDT":
+            if v.get("rate1000") is not None and b.get("rate1000") is not None:
+                # victim buys (price up), backrun sells at higher price => backrun rate higher
+                if b["rate1000"] > v["rate1000"]:
+                    backrun_pairs.append((v, b))
+        elif v.get("direction") == "TON->USDT" and b.get("direction") == "USDT->TON":
+            if v.get("rate1000") is not None and b.get("rate1000") is not None:
+                # victim sells (price down), backrun buys cheaper => backrun rate lower
+                if b["rate1000"] < v["rate1000"]:
+                    backrun_pairs.append((v, b))
+
+    print("\nBackrun candidates (victim then opposite direction, backrunner benefits, adjacent next tx, block not considered)")
+    print(f"count: {len(backrun_pairs)}")
+    for v, b in backrun_pairs:
+        dt = b.get("utime", 0) - v.get("utime", 0)
+        print(
+            f"dt={dt}s | VICTIM qid={v.get('query_id')} utime={v.get('utime')} lt={v.get('lt')} primary_lt={v.get('primary_lt')} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f} | "
+            f"BACKRUN qid={b.get('query_id')} utime={b.get('utime')} lt={b.get('lt')} primary_lt={b.get('primary_lt')} dir={b.get('direction')} rate1000={float(b.get('rate1000')):.4f}"
+        )
+
     # Same-block (notify-based block_key) frontrun candidates using primary_lt order
     print("\nSame-block frontrun candidates (notify block, primary_lt order, victim worse; block considered)")
     if FETCH_BLOCKS:
@@ -274,6 +322,17 @@ def main():
             if not bk:
                 continue
             by_block.setdefault(bk, []).append(r)
+
+        # debug: show block composition
+        print(f"blocks_with_tx: {len(by_block)}")
+        multi = {bk: arr for bk, arr in by_block.items() if len(arr) > 1}
+        print(f"blocks_with_multiple_tx: {len(multi)}")
+        for bk, arr in sorted(multi.items(), key=lambda x: x[0])[:20]:
+            arr_sorted = sorted(arr, key=lambda x: x.get("primary_lt", 0))
+            print(
+                f"block={bk} count={len(arr_sorted)} qids={[a.get('query_id') for a in arr_sorted]} "
+                f"primary_lt={[a.get('primary_lt') for a in arr_sorted]} dirs={[a.get('direction') for a in arr_sorted]}"
+            )
         for bk, arr in by_block.items():
             arr.sort(key=lambda x: x.get("primary_lt", 0))
             for i in range(1, len(arr)):
@@ -294,6 +353,37 @@ def main():
             print(
                 f"block={bk} | dt={dt}s | FR qid={fr.get('query_id')} primary_lt={fr.get('primary_lt')} dir={fr.get('direction')} rate1000={float(fr.get('rate1000')):.4f} | "
                 f"VICTIM qid={v.get('query_id')} primary_lt={v.get('primary_lt')} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f}"
+            )
+    else:
+        print("(block fetch disabled; set MEV_FETCH_BLOCKS=true to enable)")
+
+    # Same-block backrun candidates (opposite direction, backrunner benefits)
+    print("\nSame-block backrun candidates (notify block, primary_lt order, backrunner benefits; block considered)")
+    if FETCH_BLOCKS:
+        back_block_pairs = []
+        by_block = {}
+        for r in rows:
+            bk = r.get("block_key")
+            if not bk:
+                continue
+            by_block.setdefault(bk, []).append(r)
+        for bk, arr in by_block.items():
+            arr.sort(key=lambda x: x.get("primary_lt", 0))
+            for i in range(1, len(arr)):
+                v = arr[i - 1]
+                b = arr[i]
+                if v.get("direction") == "USDT->TON" and b.get("direction") == "TON->USDT":
+                    if v.get("rate1000") is not None and b.get("rate1000") is not None and b["rate1000"] > v["rate1000"]:
+                        back_block_pairs.append((bk, v, b))
+                elif v.get("direction") == "TON->USDT" and b.get("direction") == "USDT->TON":
+                    if v.get("rate1000") is not None and b.get("rate1000") is not None and b["rate1000"] < v["rate1000"]:
+                        back_block_pairs.append((bk, v, b))
+        print(f"count: {len(back_block_pairs)}")
+        for bk, v, b in back_block_pairs:
+            dt = b.get("utime", 0) - v.get("utime", 0)
+            print(
+                f"block={bk} | dt={dt}s | VICTIM qid={v.get('query_id')} primary_lt={v.get('primary_lt')} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f} | "
+                f"BACKRUN qid={b.get('query_id')} primary_lt={b.get('primary_lt')} dir={b.get('direction')} rate1000={float(b.get('rate1000')):.4f}"
             )
     else:
         print("(block fetch disabled; set MEV_FETCH_BLOCKS=true to enable)")

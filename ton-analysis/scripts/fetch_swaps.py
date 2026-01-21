@@ -1,7 +1,7 @@
 """
 STON.fi swap fetcher via tonapi.io (bundled by query_id).
-- 一発取得（limit指定のみ、ページングなし）
-- Jetton Notify / SwapV2 / PayToV2 / Jetton Transfer を query_id でまとめ、direction/in/out/rate 付きで NDJSON 出力
+- Paging with limit (default 30) is supported; use --pages / --before-lt.
+- Jetton Notify / SwapV2 / PayToV2 / Jetton Transfer are bundled by query_id with direction/in/out/rate to NDJSON.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from decimal import Decimal, InvalidOperation, getcontext
 from typing import Any, Dict, List, Optional
 
@@ -45,7 +46,15 @@ def fetch_page(api_url: str, router: str, limit: int, api_key: Optional[str], be
     return resp.json().get("transactions", [])
 
 
-def fetch_pages(api_url: str, router: str, limit: int, pages: int, api_key: Optional[str], before_lt: Optional[int]) -> List[Dict[str, Any]]:
+def fetch_pages(
+    api_url: str,
+    router: str,
+    limit: int,
+    pages: int,
+    api_key: Optional[str],
+    before_lt: Optional[int],
+    cutoff_utime: Optional[int],
+) -> List[Dict[str, Any]]:
     all_txs: List[Dict[str, Any]] = []
     cursor = before_lt
     for _ in range(max(1, pages)):
@@ -53,6 +62,12 @@ def fetch_pages(api_url: str, router: str, limit: int, pages: int, api_key: Opti
         if not txs:
             break
         all_txs.extend(txs)
+        if cutoff_utime:
+            try:
+                if min(int(t.get("utime", 0)) for t in txs if t.get("utime") is not None) < cutoff_utime:
+                    break
+            except ValueError:
+                pass
         if len(txs) < limit:
             break
         # advance cursor to fetch older txs
@@ -150,16 +165,16 @@ def compute_amounts(parts: Dict[str, Any], direction: str) -> Dict[str, Any]:
 
 
 def is_successful_swap(parts: Dict[str, Any], direction: str, amounts: Dict[str, Any]) -> bool:
-    """判定: 返金(Repay)を除外するための成功条件。
+    """Success criteria to exclude refunds (repay):
 
-    - pay.in_msg.decoded_body.exit_code が通常成功(3326308581)であること
-    - 出力トークン量が0でないこと（TON->USDTはamount1_out、USDT->TONはamount0_out）
+    - pay.in_msg.decoded_body.exit_code == 3326308581 (normal success)
+    - Output token amount is non-zero (TON->USDT uses amount1_out, USDT->TON uses amount0_out)
     """
 
     pay_decoded = ((parts.get("pay") or {}).get("in_msg") or {}).get("decoded_body") or {}
     exit_code = pay_decoded.get("exit_code")
 
-    # 正常終了コードでなければ失敗扱い
+    # treat as failed if exit code is not success
     if exit_code != 3326308581:
         return False
 
@@ -167,7 +182,7 @@ def is_successful_swap(parts: Dict[str, Any], direction: str, amounts: Dict[str,
     out_amt_str = amounts.get("out_amount")
 
     if direction == "TON->USDT":
-        # USDT出力が0なら返金とみなす
+        # If USDT output is 0, treat as refund
         amount1_out = add_info.get("amount1_out")
         return bool(amount1_out) and amount1_out != "0" and out_amt_str not in (None, "0")
     else:  # USDT->TON
@@ -243,6 +258,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int, default=30, help="Page size (tonapi limit)")
     parser.add_argument("--pages", type=int, default=1, help="How many pages to fetch (pagination backward by lt)")
     parser.add_argument("--before-lt", type=int, default=None, help="Optional before_lt for pagination anchor")
+    parser.add_argument("--max-age-mins", type=int, default=None, help="Stop when tx utime older than now - max_age_min")
     parser.add_argument("--out", default=DEFAULT_OUT, help="NDJSON output path")
     parser.add_argument(
         "--api-key",
@@ -251,6 +267,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    cutoff_utime = None
+    if args.max_age_mins:
+        cutoff_utime = int(time.time()) - args.max_age_mins * 60
+
     txs = fetch_pages(
         api_url=args.api_url,
         router=args.router,
@@ -258,6 +278,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         pages=args.pages,
         api_key=args.api_key,
         before_lt=args.before_lt,
+        cutoff_utime=cutoff_utime,
     )
     rows = build_bundles(txs)
 
