@@ -201,6 +201,17 @@ def main():
     parser = argparse.ArgumentParser(description="MEV rate check")
     parser.add_argument("--data", default=str(DEFAULT_DATA_PATH), help="NDJSON swaps file")
     parser.add_argument("--out", default=None, help="Optional output path for summary text (saved in addition to stdout)")
+    parser.add_argument(
+        "--enable-cross-block-br",
+        action="store_true",
+        help="Scan backrun across adjacent blocks (requires MEV_FETCH_BLOCKS=true)",
+    )
+    parser.add_argument(
+        "--block-gap",
+        type=int,
+        default=1,
+        help="Max block seqno gap for cross-block BR scan (same shard). Default 1",
+    )
     args = parser.parse_args()
 
     out_lines = []
@@ -433,6 +444,63 @@ def main():
                 f"block={bk} | dt={dt}s | VICTIM qid={v.get('query_id')} primary_lt={v.get('primary_lt')} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f} | "
                 f"BACKRUN qid={b.get('query_id')} primary_lt={b.get('primary_lt')} dir={b.get('direction')} rate1000={float(b.get('rate1000')):.4f}"
             )
+
+        # Cross-block backrun scan (adjacent blocks within gap on same shard)
+        if args.enable_cross_block_br:
+            emit(
+                f"\nCross-block backrun scan (block gap <= {args.block_gap}, same shard, opposite direction, backrunner benefits)"
+            )
+
+            def parse_block_key(bk: str):
+                try:
+                    wc, shard, seq = bk.split(":", 2)
+                    return int(wc), shard, int(seq)
+                except Exception:
+                    return None
+
+            shard_map = {}
+            for r in rows:
+                bk = r.get("block_key")
+                if not bk:
+                    continue
+                parsed = parse_block_key(bk)
+                if not parsed:
+                    continue
+                wc, shard, seq = parsed
+                shard_map.setdefault((wc, shard), []).append(r)
+
+            cross_pairs = []
+            for (wc, shard), arr in shard_map.items():
+                arr.sort(key=lambda x: (x.get("block_id", {}).get("seqno", 0), x.get("primary_lt", 0)))
+                for i in range(1, len(arr)):
+                    v = arr[i - 1]
+                    b = arr[i]
+                    bk_v = v.get("block_id") or {}
+                    bk_b = b.get("block_id") or {}
+                    seq_v = bk_v.get("seqno")
+                    seq_b = bk_b.get("seqno")
+                    if seq_v is None or seq_b is None:
+                        continue
+                    if seq_b - seq_v == 0:
+                        continue  # same-block already handled
+                    if seq_b - seq_v > args.block_gap:
+                        continue
+                    if v.get("direction") == "USDT->TON" and b.get("direction") == "TON->USDT":
+                        if v.get("rate1000") is not None and b.get("rate1000") is not None and b["rate1000"] > v["rate1000"]:
+                            cross_pairs.append((seq_v, seq_b, v, b))
+                    elif v.get("direction") == "TON->USDT" and b.get("direction") == "USDT->TON":
+                        if v.get("rate1000") is not None and b.get("rate1000") is not None and b["rate1000"] < v["rate1000"]:
+                            cross_pairs.append((seq_v, seq_b, v, b))
+
+            emit(f"Cross-block BR candidates (gap<={args.block_gap}): count={len(cross_pairs)}")
+            for seq_v, seq_b, v, b in cross_pairs:
+                dt = b.get("utime", 0) - v.get("utime", 0)
+                emit(
+                    f"shard={v.get('block_key')}->seq_gap={seq_b-seq_v} | dt={dt}s | VICTIM qid={v.get('query_id')} seq={seq_v} dir={v.get('direction')} rate1000={float(v.get('rate1000')):.4f} | "
+                    f"BACKRUN qid={b.get('query_id')} seq={seq_b} dir={b.get('direction')} rate1000={float(b.get('rate1000')):.4f}"
+                )
+        else:
+            emit("(cross-block backrun scan disabled; use --enable-cross-block-br to enable)")
     else:
         emit("(block fetch disabled; set MEV_FETCH_BLOCKS=true to enable)")
 
