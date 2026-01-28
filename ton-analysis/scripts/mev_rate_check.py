@@ -523,7 +523,7 @@ def main():
                 f"\n== Cross-block backrun scan (0 < block gap <= {args.block_gap}, same shard) =="
             )
             cross_pairs = scan_cross_block_br(rows, args.block_gap)
-            emit(f"Cross-block BR candidates (0 < gap <= {args.block_gap}): count={len(cross_pairs)}")
+            emit(f"Cross-block BR candidates (0 < block gap <= {args.block_gap}): count={len(cross_pairs)}")
             for seq_v, seq_b, v, b in cross_pairs:
                 dt = b.get("utime", 0) - v.get("utime", 0)
                 emit(
