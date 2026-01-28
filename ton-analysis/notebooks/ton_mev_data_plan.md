@@ -65,13 +65,20 @@
 #### スクリプト整理
 - `scripts/fetch_swaps.py`: 本番用。query_id で Jetton Notify / SwapV2 / PayToV2 / Jetton Transfer を束ね、direction/in/out/rate/lt/utime を付けて NDJSON 出力。デフォルト出力先 `ton-analysis/data/swaps_24h.ndjson`。ページングなしの単発取得（limit 指定のみ）。direction が `unknown` の行は除外。
 - `scripts/debug_extract_opcodes.py`: デバッグ用の軽量版。動作・出力フォーマットは fetch_swaps.py と同等（direction/in/out/rate 含む）が、用途は調査・比較に限定。
-- `scripts/mev_rate_check.py`: レート統一（USDT/TON decimal-adjusted, scaled by 1000）と min_out 対比の余裕度を確認する集計スクリプト。
+- `scripts/mev_rate_check.py`: レート統一（USDT/TON decimal-adjusted, scaled by 1000）、min_out 対比、FR/BR検知（同一ブロック・隣接・クロスブロック）を行う集計スクリプト。
   - レート統一: TON->USDT は 1/rate、USDT->TON は rate、その後1000倍スケール。
+  - 主なオプション:
+    - `--data <path>`: 入力NDJSON（デフォルト: data/swaps_sample.ndjson）
+    - `--out <path>`: サマリをファイル保存
+    - `--enable-cross-block-br`: ブロック差をまたぐBRスキャンを有効化（MEV_FETCH_BLOCKS=trueが必要）
+    - `--block-gap <n>`: クロスブロックBRの最大seq差（同ブロック=0は除外、デフォルト1）
   - 使い方例:
     - 直近10〜30分を取得: `python ton-analysis/scripts/fetch_swaps.py --max-age-mins 30 --limit 30 --pages 10 --out ton-analysis/data/swaps_latest.ndjson`
-    - ブロック情報を付けて解析（同一ブロックFR/バックランを判定）:
-      `MEV_FETCH_BLOCKS=true python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_latest.ndjson`
-    - ブロック取得なしで軽量解析:
+    - 同一ブロックのみのFR/BR解析（クロスBRなし）:
+      `MEV_FETCH_BLOCKS=true python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_24h.ndjson --out ton-analysis/data/mev_rate_summary.txt`
+    - 同一ブロック＋クロスブロックBR（seq差<=1、同ブロック=0は除外）:
+      `MEV_FETCH_BLOCKS=true python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_24h.ndjson --out ton-analysis/data/mev_rate_summary.txt --enable-cross-block-br --block-gap=1`
+    - ブロック取得なしで軽量解析（FR/BR=ブロック無視の隣接のみ）:
       `MEV_FETCH_BLOCKS=false python ton-analysis/scripts/mev_rate_check.py --data ton-analysis/data/swaps_latest.ndjson`
     - fetch_swapsは `NEXT_PUBLIC_TON_API_BASE_URL` / `TON_ROUTER` / `NEXT_PUBLIC_TON_API_KEY` 等を環境変数で上書き可能。mev_rate_checkは `MEV_FETCH_BLOCKS` でブロック取得のオン/オフを制御。
   - min_out 抽出: `swap.out_msg.decoded_body.dex_payload.swap_body.min_out` または `notify.in_msg.decoded_body.forward_payload.value.value.cross_swap_body.min_out`。
