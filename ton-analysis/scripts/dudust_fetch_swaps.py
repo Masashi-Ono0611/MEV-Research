@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 DEFAULT_OUT = "ton-analysis/data/dudust_swaps_latest.ndjson"
+DEFAULT_RAW_OUT = "ton-analysis/data/dudust_swaps_tonapi_raw.ndjson"
 TON_ROUTER = "EQA-X_yo3fzzbDbJ_0bzFWKqtRuZFIRa1sJsveZJ1YpViO3r"
 
 # precision for rate
@@ -98,18 +99,10 @@ def infer_direction(parts: Dict[str, Any]) -> str:
 
 def extract_meta(parts: Dict[str, Any]) -> Dict[str, Any]:
     notify = parts.get("notify") or {}
-    transfer = parts.get("transfer") or {}
 
-    def pick_lt_utime(msg: Dict[str, Any]) -> Dict[str, Any]:
-        lt = (msg.get("in_msg") or msg.get("out_msg") or {}).get("created_lt")
-        utime = (msg.get("in_msg") or msg.get("out_msg") or {}).get("created_at")
-        return {"lt": lt, "utime": utime}
-
-    n_meta = pick_lt_utime(notify) if notify else {"lt": None, "utime": None}
-    t_meta = pick_lt_utime(transfer) if transfer else {"lt": None, "utime": None}
-
-    lt = n_meta.get("lt") or t_meta.get("lt")
-    utime = n_meta.get("utime") or t_meta.get("utime")
+    in_msg = (notify.get("in_msg") or {}) if notify else {}
+    lt = (in_msg.get("created_lt"))
+    utime = (in_msg.get("created_at"))
     return {"lt": lt, "utime": utime}
 
 
@@ -162,13 +155,13 @@ def build_bundles(txs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if in_op == IN_OP_SWAP_EXTERNAL:
             qid = str((in_msg.get("decoded_body") or {}).get("query_id", ""))
             role = "notify"
-        if qid in (None, ""):
+        if qid in (None, "", "0"):
             for om in out_msgs:
                 od = om.get("decoded_body") or {}
                 qid = str(od.get("query_id", ""))
                 if qid:
                     break
-        if not qid:
+        if not qid or qid == "0":
             continue
 
         bucket = buckets.setdefault(qid, {"notify": None, "swap": None, "pay": None, "transfer": None})
@@ -212,6 +205,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--before-lt", type=int, default=None, help="Optional before_lt for pagination anchor")
     parser.add_argument("--max-age-mins", type=int, default=None, help="Stop when tx utime older than now - max_age_min")
     parser.add_argument("--out", default=DEFAULT_OUT, help="NDJSON output path")
+    parser.add_argument("--raw-out", default=DEFAULT_RAW_OUT, help="Optional: save raw tonapi txs to NDJSON")
     parser.add_argument(
         "--api-key",
         default=os.getenv("NEXT_PUBLIC_TON_API_KEY") or os.getenv("TON_API_KEY_MAINNET"),
@@ -238,6 +232,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     with open(args.out, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    if args.raw_out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.raw_out)), exist_ok=True)
+        with open(args.raw_out, "w", encoding="utf-8") as f:
+            for tx in txs:
+                f.write(json.dumps(tx, ensure_ascii=False) + "\n")
 
     print(f"fetched {len(rows)} query_id bundles -> {args.out}")
     return 0
