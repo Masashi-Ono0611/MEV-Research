@@ -98,6 +98,26 @@ def infer_direction(parts: Dict[str, Any]) -> str:
     return "unknown"
 
 
+def is_usdt_ton_pool(parts: Dict[str, Any]) -> bool:
+    """Check pool tokens are exactly USDT and PTON.
+
+    Uses pay.additional_info.{token0_address, token1_address}. Observed data always includes pay; if absent,
+    conservatively return False to avoid leaking other pools.
+    """
+
+    pay_decoded = ((parts.get("pay") or {}).get("in_msg") or {}).get("decoded_body") or {}
+    add_info = (pay_decoded.get("additional_info") or {}) if pay_decoded else {}
+
+    token0 = add_info.get("token0_address")
+    token1 = add_info.get("token1_address")
+
+    if not token0 or not token1:
+        return False
+
+    tokens = {token0, token1}
+    return tokens == {USDT_WALLET, PTON_WALLET}
+
+
 def extract_meta(parts: Dict[str, Any]) -> Dict[str, Any]:
     notify = parts.get("notify") or {}
     meta = {
@@ -230,6 +250,8 @@ def build_bundles(txs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         direction = infer_direction(parts)
         if direction == "unknown":
+            continue
+        if not is_usdt_ton_pool(parts):
             continue
         meta = extract_meta(parts)
         amounts = compute_amounts(parts, direction)
