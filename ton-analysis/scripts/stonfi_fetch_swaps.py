@@ -152,20 +152,19 @@ def is_successful_swap(parts: Dict[str, Any], direction: str, amounts: Dict[str,
 
     Rules:
     - If pay is present: require exit_code == 3326308581 and additional_info output > 0.
-    - Always require transfer amount > 0 (primary output signal).
-    - If pay is absent but transfer is present: allow (best-effort) if transfer amount > 0.
-    - Drop obvious refunds: in_amount == out_amount and (rate == "1" or rate == "1.0...").
+    - Output must be signaled by transfer amount or pay.additional_info.*_out.
     """
-
-    out_amt_str = amounts.get("out_amount")
-    in_amt_str = amounts.get("in_amount")
-    rate_str = amounts.get("rate")
 
     transfer_decoded = ((parts.get("transfer") or {}).get("out_msg") or {}).get("decoded_body") or {}
     transfer_amount = transfer_decoded.get("amount")
 
     pay_decoded = ((parts.get("pay") or {}).get("in_msg") or {}).get("decoded_body") or {}
     add_info = (pay_decoded.get("additional_info") or {}) if pay_decoded else {}
+
+    if pay_decoded:
+        exit_code = pay_decoded.get("exit_code")
+        if exit_code != 3326308581:
+            return False
 
     out_from_pay = None
     if direction == "TON->USDT":
@@ -180,15 +179,6 @@ def is_successful_swap(parts: Dict[str, Any], direction: str, amounts: Dict[str,
         output_ok = True
     if not output_ok:
         return False
-
-    # Refund heuristic: identical in/out and rate ~1
-    if in_amt_str is not None and out_amt_str is not None:
-        try:
-            if Decimal(in_amt_str) == Decimal(out_amt_str):
-                if rate_str and str(rate_str).startswith("1"):
-                    return False
-        except Exception:
-            pass
 
     return True
 
