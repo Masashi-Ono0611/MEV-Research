@@ -10,7 +10,6 @@ from typing import Optional
 import requests
 
 DEFAULT_DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "swaps_sample.ndjson"
-SCALE = Decimal(1000)
 TON_API_BASE = os.getenv("TON_API_BASE_URL") or os.getenv("NEXT_PUBLIC_TON_API_BASE_URL") or "https://tonapi.io"
 FETCH_BLOCKS = (os.getenv("MEV_FETCH_BLOCKS") or "true").lower() in ("1", "true", "yes", "on")
 
@@ -111,15 +110,20 @@ def compute_rates(rows):
     rates = []
     rates_by_dir = {"TON->USDT": [], "USDT->TON": []}
     for r in rows:
-        if r["direction"] == "TON->USDT":
-            val = Decimal(1) / Decimal(r["rate"])
-        else:  # USDT->TON
-            val = Decimal(r["rate"])
-        rates.append(val * SCALE)
+        base = Decimal(r["rate"])
+        if r["direction"] == "USDT->TON":
+            # Convert to USDT per TON (nanoton / micro USDT -> divide by 1e3)
+            val = Decimal(1000) / base
+        else:  # TON->USDT: base is USDT per TON divided by 1000; upscale by 1e3
+            val = base * Decimal(1000)
+
+        rate_norm = val  # USDT per TON (decimal-adjusted)
+        rates.append(rate_norm)
         if r["direction"] in rates_by_dir:
-            rates_by_dir[r["direction"]].append(val * SCALE)
-        # store per-row scaled rate for later use
-        r["rate1000"] = float(val * SCALE)
+            rates_by_dir[r["direction"]].append(rate_norm)
+
+        # store per-row normalized rate for later use
+        r["rate1000"] = float(rate_norm)
     return rates, rates_by_dir
 
 
@@ -127,8 +131,8 @@ def sanity_filter(rows):
     """Filter obvious outliers by loose direction-specific ranges.
 
     Rationale (keep simple):
-    - USDT->TON expected rate ~0.0015 (USDT/TON). TON<->TON swaps show rate≈1, so drop anything >0.01 or <1e-6.
-    - TON->USDT expected ~600-700 (TON/USDT inverse). Drop anything far outside 10-5000 to avoid dividing errors/extremes.
+    - USDT->TON expected rate is large (~600; USDT per TON). Drop anything <=0 or absurdly high (e.g., >5000) to avoid TON<->TON noise or malformed rows.
+    - TON->USDT expected rate is small (~0.0015; TON per USDT). Drop anything <=0 or too large (e.g., >=0.01) to exclude inverted/outlier values.
     """
 
     filtered = []
@@ -136,11 +140,13 @@ def sanity_filter(rows):
     for r in rows:
         rate = Decimal(r["rate"])
         if r.get("direction") == "USDT->TON":
-            if rate <= Decimal("0") or rate >= Decimal("1000000"):
+            # USDT->TON は rate ~600 (USDT/TON)
+            if rate <= Decimal("0") or rate >= Decimal("5000"):
                 dropped.append((r, "usdt_ton_sanity"))
                 continue
         elif r.get("direction") == "TON->USDT":
-            if rate <= Decimal("0") or rate >= Decimal("1000"):
+            # TON->USDT は rate ~0.0015 (TON/USDT)
+            if rate <= Decimal("0") or rate >= Decimal("0.01"):
                 dropped.append((r, "ton_usdt_sanity"))
                 continue
         filtered.append(r)
@@ -426,10 +432,10 @@ def main():
     # sort by primary_lt, then utime as tiebreaker
     rows.sort(key=lambda x: (x.get("primary_lt", 0), x.get("utime", 0)))
     scaled_rates, rates_by_dir = compute_rates(rows)
-    summary = summarize("USDT/TON *1000", scaled_rates)
+    summary = summarize("USDT/TON", scaled_rates)
 
     # Direction-wise summary first
-    emit("\n== Direction breakdown: USDT/TON decimal-adjusted (scaled by 1000) ==")
+    emit("\n== Direction breakdown: USDT/TON decimal-adjusted ==")
     for direction, vals in rates_by_dir.items():
         if not vals:
             continue
@@ -437,7 +443,7 @@ def main():
         emit(format_stats(direction, s))
 
     # Overall summary next
-    emit("\n== Overall USDT/TON decimal-adjusted (scaled by 1000) ==")
+    emit("\n== Overall USDT/TON decimal-adjusted ==")
     for k in ["count", "min", "max", "median", "mean", "stdev"]:
         emit(f"{k}: {summary[k]}")
 
